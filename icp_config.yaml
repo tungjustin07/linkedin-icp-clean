@@ -1,0 +1,114 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# ICP (Ideal Customer Profile) Configuration
+# GTM Systems / RevOps consulting — end-to-end builds, data hygiene, enrichment
+# ─────────────────────────────────────────────────────────────────────────────
+
+icp:
+  description: >
+    Series C through Series E B2B SaaS companies with a dedicated Revenue
+    Operations or GTM Systems function. Primary buyer is VP RevOps or
+    Director-level operators who own the GTM tech stack, data infrastructure,
+    or AI/automation roadmap. IC champions in RevOps/Marketing Ops/GTM Systems
+    roles are strong signals too. Hired for end-to-end GTM system builds, data
+    hygiene, enrichment pipelines, CRM architecture, and AI transformation.
+    Past coworkers and alumni are the HIGHEST-signal connections regardless of
+    current title — treat any connection at a well-known B2B SaaS company with
+    an ops-adjacent title as near-ICP if they could be a referral source.
+    NOT a founder or CEO sale. NOT early-stage (Seed/Series A).
+
+  # Partial-match strings (case-insensitive substring match).
+  target_titles:
+    # Primary buyers
+    - "VP Revenue Operations"
+    - "VP RevOps"
+    - "VP of RevOps"
+    - "Head of Revenue Operations"
+    - "Head of RevOps"
+    - "Director of Revenue Operations"
+    - "Director of RevOps"
+    - "VP Sales Operations"
+    - "Director of Sales Operations"
+    - "Head of Sales Operations"
+    # IC champions
+    - "Revenue Operations Manager"
+    - "Revenue Operations"
+    - "RevOps Manager"
+    - "GTM Systems"
+    - "GTM Operations"
+    - "GTM Engineer"
+    - "Sales Operations Manager"
+    - "Sales Ops"
+    - "Marketing Operations"
+    - "Marketing Ops"
+    - "CRM Administrator"
+    - "CRM Manager"
+    - "CRM Architect"
+    - "Business Systems"
+    - "Go-to-Market"
+    # Adjacent buyers
+    - "Chief Revenue Officer"
+    - "CRO"
+    - "VP Marketing"
+    - "Head of Marketing"
+
+  # Industries that indicate a good-fit company.
+  target_industries:
+    - "Software"
+    - "SaaS"
+    - "Technology"
+    - "Information Technology"
+    - "Enterprise Software"
+    - "Computer Software"
+    - "Internet"
+    - "FinTech"
+    - "MarTech"
+    - "Sales Technology"
+    - "Data Analytics"
+    - "Cloud Computing"
+    - "Artificial Intelligence"
+
+  # Series C–E = typically 200–5000 employees on LinkedIn.
+  company_sizes:
+    - "201-500"
+    - "501-1000"
+    - "1001-5000"
+
+  # Profiles matching any anti-pattern are auto-failed at triage.
+  # Keep this focused — don't over-filter. Individual sales reps have low
+  # purchase authority but can still be referral sources; exclude only clear
+  # zero-value profiles.
+  anti_patterns:
+    - "Student"
+    - "Intern"
+    - "Recruiter"
+    - "Talent Acquisition"
+    - "HR Manager"
+    - "Human Resources"
+    - "People Operations"  # HR rebranded
+    - "Personal Trainer"
+    - "Real Estate Agent"
+    - "Real Estate Broker"
+    - "Insurance Agent"
+    - "Financial Advisor"
+    - "Life Coach"
+    - "Account Executive"  # ICs with no buying authority in this context
+    - "SDR"
+    - "BDR"
+    - "Business Development Representative"
+    - "Sales Development Representative"
+
+  # Title match weighted highest — buyer is very title-specific.
+  # Recency low — a well-connected past coworker from 5 years ago still matters.
+  scoring_weights:
+    title_match: 0.45
+    industry_match: 0.25
+    company_size_match: 0.20
+    recency: 0.05
+    engagement_potential: 0.05
+
+  # Haiku confidence floor to pass to Sonnet.
+  triage_pass_threshold: 0.30
+
+  # Sonnet score floor for keep.csv. Set lower than default (65→55) because
+  # referral-network value matters even for non-direct buyers.
+  keep_score_threshold: 55
