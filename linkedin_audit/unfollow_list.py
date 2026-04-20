@@ -38,13 +38,29 @@ TIER_DEPRIORITIZE = "4_DEPRIORITIZE"  # Sonnet DEPRIORITIZE (30–44) — judgme
 # potential hirers/peers, etc.). These hints let the user filter the unfollow
 # list for "review don't auto-remove" without re-scoring.
 
-# VC / investor roles — good introducers even though they don't buy directly.
+# VC / investor — good introducers even though they don't buy directly.
+#
+# Three-tier matching:
+#   1. Title-level VC signal (strong, unambiguous): General Partner, Managing
+#      Partner, Venture Partner, Angel Investor, etc. → flag regardless of company.
+#   2. Company-level strong VC signal: "Ventures" / "Capital" in the company
+#      name → almost always an investment firm (VC, PE, hedge fund) → flag
+#      regardless of title, because even non-partner investor titles
+#      (Principal, Managing Director, Investment Director) belong here.
+#   3. Company-level WEAK VC signal: "Partners" in the company name → ambiguous
+#      (law firms, consulting, recruitment, VC) — require an investor-ish
+#      title ("Partner", "Investment", "Portfolio", "Fund") to flag, else
+#      skip to avoid false positives on Recruiters / HR Business Partners.
 VC_PATTERNS = [
-    r"\bventure\b", r"\bvc\b", r"\binvestor\b", r"general partner", r"managing partner",
-    r"founding partner", r"venture partner", r"angel\b", r"limited partner",
-    r"\blp\b", r"\bgp\b", r"growth equity", r"\bpartner\b, ",
+    r"\bventure\b", r"\bvc\b", r"\binvestor\b", r"general partner",
+    r"managing partner", r"founding partner", r"venture partner",
+    r"\bangel\b.*\binvestor\b", r"limited partner", r"growth equity",
 ]
-VC_COMPANY_PATTERNS = [r"\bventures\b", r"\bcapital\b", r"\bpartners\b", r"\bfunds?\b"]
+VC_STRONG_COMPANY_PATTERNS = [r"\bventures?\b", r"\bcapital\b"]
+VC_WEAK_COMPANY_PATTERNS = [r"\bpartners\b"]
+VC_ADJACENT_TITLE_PATTERNS = [
+    r"\bpartner\b", r"\binvestment\b", r"\bportfolio\b", r"\bfund\b",
+]
 
 # IT leadership — secondary buyer persona (can hire or get hired, peer to RevOps).
 IT_LEADER_PATTERNS = [
@@ -80,11 +96,16 @@ def _compute_rescue_hint(row: pd.Series, msg_index: dict[str, int]) -> str:
 
     hints: list[str] = []
 
-    # VC signal — either role OR company-name heuristic
+    # VC signal — three tiers (see pattern comments above)
     if any(re.search(p, pos) for p in VC_PATTERNS):
         hints.append("VC_INTRODUCER")
-    elif any(re.search(p, comp) for p in VC_COMPANY_PATTERNS) and "partner" in pos:
-        # Someone whose title has "Partner" and works at a "Ventures"/"Capital" firm
+    elif any(re.search(p, comp) for p in VC_STRONG_COMPANY_PATTERNS):
+        # "Ventures" / "Capital" in company = investment firm, any title is fine
+        hints.append("VC_INTRODUCER")
+    elif any(re.search(p, comp) for p in VC_WEAK_COMPANY_PATTERNS) and any(
+        re.search(p, pos) for p in VC_ADJACENT_TITLE_PATTERNS
+    ):
+        # "Partners" in company is ambiguous — require investor-ish title
         hints.append("VC_INTRODUCER")
 
     # IT leadership
