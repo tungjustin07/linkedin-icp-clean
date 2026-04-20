@@ -5,16 +5,45 @@
 
 icp:
   description: >
-    Series C through Series E B2B SaaS companies with a dedicated Revenue
-    Operations or GTM Systems function. Primary buyer is VP RevOps or
-    Director-level operators who own the GTM tech stack, data infrastructure,
-    or AI/automation roadmap. IC champions in RevOps/Marketing Ops/GTM Systems
-    roles are strong signals too. Hired for end-to-end GTM system builds, data
-    hygiene, enrichment pipelines, CRM architecture, and AI transformation.
-    Past coworkers and alumni are the HIGHEST-signal connections regardless of
-    current title — treat any connection at a well-known B2B SaaS company with
-    an ops-adjacent title as near-ICP if they could be a referral source.
-    NOT a founder or CEO sale. NOT early-stage (Seed/Series A).
+    Series B through Series E B2B SaaS companies (headcount ~150–2,500) with a
+    dedicated RevOps, GTM Systems, or Growth Engineering function that has hit
+    the complexity wall — multi-object Salesforce architecture, active enrichment
+    pipelines, SFDC CPQ / billing integrations, or a tangled Zapier / Workato
+    estate they can no longer self-manage. Two parallel buyer tracks, not one:
+    (1) Traditional RevOps leadership — VP / Head / Director of Revenue
+    Operations or Sales Operations — who own process and hold budget; and
+    (2) Technical GTM Systems leadership — Head of GTM Systems, GTM Engineering
+    Lead, Manager of Business Systems, RevOps Architect, or staff / principal
+    RevOps IC — often the ACTUAL technical decision-maker, especially at
+    Ramp / Brex / Stripe-style modern orgs where Growth Engineering co-owns GTM
+    infrastructure with RevOps. IC champions in MarketingOps, SalesOps, and
+    Data Engineering adjacent to GTM are high-value entry points. Past coworkers
+    and ops / systems alumni from technically sophisticated B2B SaaS companies
+    are HIGHEST-signal regardless of current title. Sweet-spot engagements:
+    Salesforce data-model rebuilds, enrichment waterfall design (Clay-anchored),
+    integration governance after Zapier / Workato sprawl, SFDC ↔ ERP / CPQ /
+    Billing unblocks, and AI / agent-driven RevOps transformation (MCP-to-CRM,
+    AI SDR evaluation, LLM-enriched pipelines). Explicitly NOT a founder or CEO
+    sale, NOT early-stage pre-RevOps companies, and NOT a pure BI / analytics
+    sale — every engagement must touch the GTM system-of-record.
+
+    SCORING HIERARCHY (BOTH tracks are ICP — this ranks them for score
+    calibration; the goal of this audit is to PRUNE low-signal connections,
+    not to find new leads):
+      1. VP / Head / Director of RevOps, Sales Ops, or GTM Systems at
+         target-size B2B SaaS → top-tier buyer, score 80–100, KEEP_ENGAGE.
+      2. Staff / Principal / Lead GTM Systems, Growth Engineer, or RevOps
+         Architect at target-size B2B SaaS → valuable technical influencer
+         and referral source, score 60–80, KEEP_ENGAGE or KEEP_NURTURE.
+      3. IC-level RevOps / MarketingOps / SalesOps Manager without
+         seniority signals at target companies → real but lower-priority,
+         score 45–65, KEEP_NURTURE.
+      4. Past ops / systems coworkers or alumni of sophisticated B2B SaaS
+         orgs, even at off-title current roles → warm network, score 50–70
+         based on inferred referral value.
+      5. Everyone else — founders / CEOs, non-target industries, off-role ICs,
+         pre-RevOps-stage companies, BI-only analytics roles → score <45,
+         REMOVE (these are the unfollow candidates).
 
   # Partial-match strings (case-insensitive substring match).
   target_titles:
@@ -45,6 +74,27 @@ icp:
     - "CRM Architect"
     - "Business Systems"
     - "Go-to-Market"
+    # GTM Systems / Growth Engineering track (modern-stack buyers)
+    - "Head of GTM Systems"
+    - "Director of GTM Systems"
+    - "GTM Engineering Lead"
+    - "Growth Engineer"
+    - "Head of Growth Engineering"
+    - "Salesforce Architect"
+    - "RevOps Architect"
+    - "Principal Salesforce Engineer"
+    - "Manager of Business Systems"
+    - "Director of Business Systems"
+    - "Head of Business Systems"
+    - "Head of MarketingOps"
+    - "Marketing Operations Lead"
+    - "Sales Systems Manager"
+    - "Sales Operations Engineer"
+    - "Staff RevOps"
+    - "Principal RevOps"
+    - "Head of Revenue Systems"
+    - "Revenue Platform Lead"
+    - "GTM Data Engineer"
     # Adjacent buyers
     - "Chief Revenue Officer"
     - "CRO"
@@ -66,6 +116,19 @@ icp:
     - "Data Analytics"
     - "Cloud Computing"
     - "Artificial Intelligence"
+    # Sub-buckets surfaced by comment behavior — these are over-represented
+    # in Justin's engagement and reveal the modern-stack ICP sweet spot.
+    - "Developer Tools"
+    - "Infrastructure SaaS"
+    - "AI-native SaaS"
+    - "LLM Infrastructure"
+    - "Applied AI"
+    - "Vertical SaaS"
+    - "GTM Tooling"
+    - "Sales Tech"
+    - "Data Platform"
+    - "Usage-based SaaS"
+    - "Consumption Pricing"
 
   # Series C–E = typically 200–5000 employees on LinkedIn.
   company_sizes:
@@ -96,6 +159,12 @@ icp:
     - "BDR"
     - "Business Development Representative"
     - "Sales Development Representative"
+    # Founder / CEO = wrong buyer motion (confirmed by comment behavior —
+    # Justin treats founder-led sales as a phase companies should exit).
+    - "Founder"
+    - "Co-Founder"
+    - "CEO"
+    - "Chief Executive Officer"
 
   # Title match weighted highest — buyer is very title-specific.
   # Recency low — a well-connected past coworker from 5 years ago still matters.

@@ -1,9 +1,14 @@
 """
 Tier-2 AI scoring: deep ICP analysis with Claude Sonnet.
 
-Runs one profile at a time (Sonnet is expensive — quality over throughput).
-Results are cached to cache/scores.parquet after every single profile so
-a crash mid-run never loses completed work.
+Batched + prompt-cached for cost efficiency:
+  - SCORE_BATCH_SIZE profiles per API call (mirrors triage.py's batching pattern)
+  - Static context (role preamble + ICP definition + customer examples + rubric)
+    is sent as a cache_control=ephemeral `system` block so the Anthropic API
+    caches it for 5 minutes, cutting repeated input cost ~90% on cached tokens.
+
+Results are persisted to cache/scores.parquet after every batch so a crash
+mid-run never loses completed work.
 """
 
 from __future__ import annotations
@@ -21,6 +26,7 @@ log = logging.getLogger("linkedin_audit.score")
 
 DEFAULT_CACHE_PATH = Path("cache/scores.parquet")
 MAX_CUSTOMER_EXAMPLES = 5
+SCORE_BATCH_SIZE = 5  # Sonnet is heavier than Haiku — keep batches small
 
 _SCORE_SCHEMA = {
     "profile_id": "str",
@@ -31,49 +37,62 @@ _SCORE_SCHEMA = {
 }
 
 _TOOL = {
-    "name": "score_profile",
-    "description": "Return ICP scoring analysis for a single LinkedIn profile.",
+    "name": "score_profiles",
+    "description": "Return ICP scoring analysis for a batch of LinkedIn profiles.",
     "input_schema": {
         "type": "object",
         "properties": {
-            "icp_score": {
-                "type": "integer",
-                "minimum": 0,
-                "maximum": 100,
-                "description": "0–100 ICP fit score",
-            },
-            "recommendation": {
-                "type": "string",
-                "enum": ["KEEP_ENGAGE", "KEEP_NURTURE", "DEPRIORITIZE", "REMOVE"],
-                "description": (
-                    "KEEP_ENGAGE=70+, active outreach warranted. "
-                    "KEEP_NURTURE=45-69, keep but passive. "
-                    "DEPRIORITIZE=30-44, unlikely to convert. "
-                    "REMOVE=below 30, not ICP."
-                ),
-            },
-            "reasoning": {
-                "type": "string",
-                "description": "2–4 sentences grounded in the profile data and ICP definition.",
-            },
-            "action_items": {
+            "results": {
                 "type": "array",
-                "items": {"type": "string"},
-                "maxItems": 3,
-                "description": "Specific next steps (empty list for REMOVE/DEPRIORITIZE).",
-            },
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "index": {
+                            "type": "integer",
+                            "description": "0-based index matching the input batch order",
+                        },
+                        "icp_score": {
+                            "type": "integer",
+                            "minimum": 0,
+                            "maximum": 100,
+                            "description": "0–100 ICP fit score",
+                        },
+                        "recommendation": {
+                            "type": "string",
+                            "enum": ["KEEP_ENGAGE", "KEEP_NURTURE", "DEPRIORITIZE", "REMOVE"],
+                            "description": (
+                                "KEEP_ENGAGE=70+, active outreach warranted. "
+                                "KEEP_NURTURE=45-69, keep but passive. "
+                                "DEPRIORITIZE=30-44, unlikely to convert. "
+                                "REMOVE=below 30, not ICP."
+                            ),
+                        },
+                        "reasoning": {
+                            "type": "string",
+                            "description": "2–4 sentences grounded in the profile data and ICP definition.",
+                        },
+                        "action_items": {
+                            "type": "array",
+                            "items": {"type": "string"},
+                            "maxItems": 3,
+                            "description": "Specific next steps (empty list for REMOVE/DEPRIORITIZE).",
+                        },
+                    },
+                    "required": ["index", "icp_score", "recommendation", "reasoning", "action_items"],
+                },
+            }
         },
-        "required": ["icp_score", "recommendation", "reasoning", "action_items"],
+        "required": ["results"],
     },
 }
 
-_SYSTEM = (
+_ROLE_PREAMBLE = (
     "You are a senior B2B sales strategist scoring LinkedIn connections for ICP fit. "
-    "Your job is to produce a precise, evidence-based ICP score for a single profile. "
-    "You will be given: (1) the profile, (2) the ICP definition, (3) example ICP customers. "
-    "Score the profile on a 0–100 scale where: "
+    "Your job is to produce precise, evidence-based ICP scores for a batch of profiles. "
+    "You will be given: (1) the ICP definition, (2) example ICP customers, (3) a batch of "
+    "LinkedIn profiles. Score each profile on a 0–100 scale where: "
     "0–30=Poor fit, 31–60=Partial fit, 61–80=Good fit, 81–100=Excellent fit. "
-    "Return your analysis using the score_profile tool."
+    "Return your analysis using the score_profiles tool."
 )
 
 
@@ -88,14 +107,19 @@ def run_scoring(
     messages: "pd.DataFrame | None" = None,
     cache_path: Path = DEFAULT_CACHE_PATH,
     dry_run: bool = False,
+    dry_run_sample: int = 50,
 ) -> pd.DataFrame:
     """
     Run Sonnet deep scoring on all profiles where triage_results.triage_pass == True.
+    Profiles are grouped into batches of SCORE_BATCH_SIZE and scored in a single
+    Sonnet call per batch.
 
     Args:
         messages: Optional per-profile message engagement stats from ingest.load_messages().
                   When provided, message history is included in the scoring prompt and
                   significantly boosts scores for profiles with active DM history.
+        dry_run: When True, cap input to dry_run_sample profiles and skip cache writes.
+        dry_run_sample: Max profiles to score in dry_run mode (default 50).
 
     Returns a DataFrame with columns:
       profile_id, icp_score, recommendation, reasoning, action_items
@@ -104,6 +128,11 @@ def run_scoring(
     cached_ids = set(cache["profile_id"].tolist()) if not cache.empty else set()
 
     passed = triage_results[triage_results["triage_pass"] == True]  # noqa: E712
+
+    if dry_run:
+        passed = passed.head(dry_run_sample)
+        log.info("Dry-run: processing up to %d profiles (no cache write)", len(passed))
+
     passed_ids = set(passed["profile_id"].tolist())
     to_score_ids = passed_ids - cached_ids
 
@@ -128,16 +157,20 @@ def run_scoring(
     icp = icp_config["icp"]
     customer_examples = _format_customer_examples(customers)
 
+    # Build the cached system block ONCE per run — stable across all batches.
+    # cache_control=ephemeral tells the API to cache this content for 5 minutes.
+    system_blocks = _build_system_blocks(icp, customer_examples)
+
     # Index message stats by profile_id for O(1) lookup
     msg_index: dict[str, dict] = {}
     if messages is not None and not messages.empty:
         msg_index = messages.set_index("profile_id").to_dict("index")
         log.info("Message signals available for %d profiles", len(msg_index))
 
-    new_rows: list[dict] = []
-
-    for _, row in tqdm(to_score.iterrows(), total=len(to_score), desc="Scoring (Sonnet)", unit="profile"):
-        profile = {
+    # Build list of profile dicts to score
+    profiles: list[dict] = []
+    for _, row in to_score.iterrows():
+        profiles.append({
             "profile_id": row["profile_id"],
             "full_name": row["full_name"] or "Unknown",
             "position": row["position"] or "Unknown",
@@ -151,14 +184,25 @@ def run_scoring(
             "category": row.get("category", "UNKNOWN"),
             "triage_reason": row.get("triage_reason", ""),
             "msg_stats": msg_index.get(row["profile_id"]),
-        }
+        })
 
-        result = _score_profile(profile, icp, customer_examples, client)
-        new_rows.append(result)
+    batches = [
+        profiles[i:i + SCORE_BATCH_SIZE]
+        for i in range(0, len(profiles), SCORE_BATCH_SIZE)
+    ]
+
+    new_rows: list[dict] = []
+    for batch_idx, batch in enumerate(
+        tqdm(batches, desc="Scoring (Sonnet)", unit="batch")
+    ):
+        results = _score_batch(
+            batch, system_blocks, client, log_usage=(batch_idx < 2)
+        )
+        new_rows.extend(results)
 
         if not dry_run:
-            row_df = pd.DataFrame([result])
-            _save_score_cache(row_df, cache_path)
+            batch_df = pd.DataFrame(results)
+            _save_score_cache(batch_df, cache_path)
 
     new_df = pd.DataFrame(new_rows) if new_rows else pd.DataFrame(columns=list(_SCORE_SCHEMA))
     combined = pd.concat([cache, new_df], ignore_index=True)
@@ -208,50 +252,92 @@ def _parse_list(val) -> list:
     return []
 
 
-# ── Sonnet scoring ────────────────────────────────────────────────────────────
+# ── Sonnet batch scoring ──────────────────────────────────────────────────────
 
 
-def _score_profile(
-    profile: dict,
-    icp: dict,
-    customer_examples: list[dict],
+def _score_batch(
+    batch: list[dict],
+    system_blocks: list[dict],
     client,
-) -> dict:
-    """Call Sonnet for a single profile. Returns a scored result dict."""
-    prompt = _build_score_prompt(profile, icp, customer_examples)
+    log_usage: bool = False,
+) -> list[dict]:
+    """Call Sonnet once for a batch of N profiles, return N scored result dicts."""
+    prompt = _build_batch_prompt(batch)
 
     msg = call_with_backoff(
         client=client,
         model=SONNET_MODEL,
-        system=_SYSTEM,
+        system=system_blocks,
         messages=[{"role": "user", "content": prompt}],
         tools=[_TOOL],
-        max_tokens=1000,
+        max_tokens=2500,
     )
+
+    if log_usage:
+        usage = getattr(msg, "usage", None)
+        if usage is not None:
+            log.info(
+                "Sonnet batch usage — in:%s out:%s cache_read:%s cache_create:%s",
+                getattr(usage, "input_tokens", "?"),
+                getattr(usage, "output_tokens", "?"),
+                getattr(usage, "cache_read_input_tokens", "?"),
+                getattr(usage, "cache_creation_input_tokens", "?"),
+            )
 
     tool_block = next((b for b in msg.content if b.type == "tool_use"), None)
     if tool_block is None:
-        log.warning("Sonnet returned no tool_use for %s — defaulting to score 0", profile["profile_id"])
-        return _default_score(profile["profile_id"])
+        log.warning("Sonnet returned no tool_use for batch — defaulting all to score 0")
+        return [_default_score(item["profile_id"]) for item in batch]
 
     try:
-        inp = tool_block.input
-        return {
-            "profile_id": profile["profile_id"],
-            "icp_score": int(inp.get("icp_score", 0)),
-            "recommendation": inp.get("recommendation", "REMOVE"),
-            "reasoning": inp.get("reasoning", ""),
-            "action_items": inp.get("action_items", []),
-        }
+        raw_results: list[dict] = tool_block.input.get("results", [])
     except Exception as e:
-        log.warning("Failed to parse Sonnet output for %s: %s", profile["profile_id"], e)
-        return _default_score(profile["profile_id"])
+        log.warning("Failed to parse tool_use input: %s — defaulting batch", e)
+        return [_default_score(item["profile_id"]) for item in batch]
+
+    # Align by index, fill missing slots with _default_score
+    result_by_idx = {
+        r["index"]: r
+        for r in raw_results
+        if isinstance(r, dict) and "index" in r
+    }
+    output: list[dict] = []
+    for idx, item in enumerate(batch):
+        r = result_by_idx.get(idx)
+        if r is None:
+            log.warning(
+                "Missing score for batch index %d (%s) — defaulting", idx, item["profile_id"]
+            )
+            output.append(_default_score(item["profile_id"]))
+            continue
+        try:
+            output.append({
+                "profile_id": item["profile_id"],
+                "icp_score": int(r.get("icp_score", 0)),
+                "recommendation": r.get("recommendation", "REMOVE"),
+                "reasoning": r.get("reasoning", ""),
+                "action_items": list(r.get("action_items") or []),
+            })
+        except Exception as e:
+            log.warning("Failed to parse result for %s: %s", item["profile_id"], e)
+            output.append(_default_score(item["profile_id"]))
+    return output
 
 
-def _build_score_prompt(profile: dict, icp: dict, customer_examples: list[dict]) -> str:
+def _build_system_blocks(icp: dict, customer_examples: list[dict]) -> list[dict]:
+    """
+    Assemble the cached system content: role preamble + ICP definition +
+    customer examples + scoring rubric. Marked with cache_control=ephemeral
+    so the Anthropic API caches it for 5 minutes across batches.
+
+    NOTE: tool-level cache_control is silently ignored by this API surface
+    (verified empirically — in:~3000 cr_read:0 cr_create:0). System-level
+    cache_control works. Keep the marker here, not on the tool definition.
+    """
     weights = icp.get("scoring_weights", {})
     titles = ", ".join(icp.get("target_titles", []))
     industries = ", ".join(icp.get("target_industries", []))
+    sizes = ", ".join(icp.get("company_sizes", []))
 
     if customer_examples:
         examples_block = "\n".join(
@@ -261,12 +347,14 @@ def _build_score_prompt(profile: dict, icp: dict, customer_examples: list[dict])
     else:
         examples_block = "No example customers provided — rely on ICP definition alone."
 
-    return f"""## ICP Definition
+    text = f"""{_ROLE_PREAMBLE}
+
+## ICP Definition
 {icp.get("description", "")}
 
 Target titles: {titles}
 Target industries: {industries}
-Company sizes: {", ".join(icp.get("company_sizes", []))}
+Company sizes: {sizes}
 
 Scoring weights:
 - Title/role match: {weights.get("title_match", 0.4)}
@@ -278,30 +366,119 @@ Scoring weights:
 ## Example ICP Customers (few-shot reference)
 {examples_block}
 
-## Profile to Score
-Name:             {profile["full_name"]}
-Position:         {profile["position"]}
-Company:          {profile["company"]}
-Connected:        {profile["connected_on"]}
-LinkedIn:         {profile.get("url", "N/A")}
-Triage Category:  {profile.get("category", "UNKNOWN")}
-Triage Reason:    {profile.get("triage_reason", "")}
-{_format_msg_block(profile.get("msg_stats"))}
-## Task
-Score this profile 0–100 for ICP fit and return your analysis using the score_profile tool.
-Recommendations:
-  KEEP_ENGAGE    = 70+ score, active outreach warranted
-  KEEP_NURTURE   = 45–69 score, worth keeping but passive
-  DEPRIORITIZE   = 30–44 score, keep but unlikely to convert
-  REMOVE         = below 30, not ICP, no value maintaining connection
+## Scoring Rubric
+For each profile in the batch, return:
+  icp_score       : 0–100 integer (0–30 Poor, 31–60 Partial, 61–80 Good, 81–100 Excellent)
+  recommendation  : KEEP_ENGAGE (70+, active outreach) | KEEP_NURTURE (45–69, passive) |
+                    DEPRIORITIZE (30–44, unlikely to convert) | REMOVE (<30, not ICP)
+  reasoning       : 2–4 sentences grounded in the profile data and ICP definition
+  action_items    : up to 3 specific next steps (empty list for REMOVE/DEPRIORITIZE)
 
-IMPORTANT: Active DM history is a strong positive signal. A profile with real back-and-forth
-message threads should almost never score below 45, regardless of title/company fit.
-"""
+IMPORTANT: Active DM history is a strong positive signal. A profile with real
+back-and-forth message threads should almost never score below 45, regardless of
+title/company fit.
+
+## Worked Scoring Examples (calibration reference)
+
+The following examples illustrate how the rubric above should be applied. Use them
+to anchor your own scoring — if your score for a new profile feels far from
+these anchors, reconsider.
+
+[Example A] Sarah Chen — VP Revenue Operations at Stripe — connected 6 months ago,
+no DM history yet. Stripe is a flagship modern B2B FinTech SaaS at target scale.
+Title is an exact Tier-1 match (VP RevOps), and company archetype is textbook
+sweet-spot (guaranteed SFDC + billing + enrichment complexity). No DM history
+is a neutral, not negative — active outreach is warranted.
+  → icp_score 90, recommendation KEEP_ENGAGE.
+  Reasoning: Exact Tier-1 buyer title at an iconic modern-stack B2B SaaS
+  company. Stripe's GTM sophistication and complexity-wall signals are
+  unambiguous; outreach should be aggressive.
+
+[Example B] John Smith — Staff GTM Engineer at Ramp — connected 3 years ago,
+15 DMs over 6 months with Justin initiating first, last message within 30 days.
+Staff-level technical IC in the GTM Systems / Growth Engineering track at a
+prototypical modern-stack B2B SaaS (Ramp is the canonical exemplar from the
+ICP definition). Warm DM thread elevates score above pure title-based value.
+  → icp_score 82, recommendation KEEP_ENGAGE.
+  Reasoning: Tier-2 technical buyer/referral source at a gold-standard modern
+  B2B SaaS. Staff GTM Engineer is the exact Track 2 persona. Active DM history
+  compounds the signal — this is a live relationship worth deepening.
+
+[Example C] Jane Doe — Director of Product at HubSpot — connected 2 years ago,
+no DM history. Director-level but wrong function (Product, not RevOps/GTM
+Systems). HubSpot is a target company, but Product leadership does not own the
+GTM system-of-record. Not an ICP buyer; possibly a referral source at best.
+  → icp_score 32, recommendation DEPRIORITIZE.
+  Reasoning: Right company, wrong function. Product leadership has no budget
+  or decision authority for RevOps / GTM Systems engagements. Keep as a passive
+  network contact but not a priority outreach target.
+
+[Example D] Alex Brown — Founder & CEO at Acme Consulting — connected 1 year
+ago, 3 DMs (they initiated). Founder status is an explicit anti-pattern — they
+run a services/consulting firm, not a target B2B SaaS buyer. DM history came
+from them selling or networking, not buying.
+  → icp_score 15, recommendation REMOVE.
+  Reasoning: Founder anti-pattern. Consulting-firm owner is a peer/competitor,
+  not a buyer. Even with DM history, the sell-side dynamic disqualifies them
+  from the ICP. This is a clear unfollow candidate.
+
+[Example E] Priya Patel — Revenue Operations Manager at a pre-Series B startup
+(15 employees) — connected 4 months ago, no DMs. Right title and function,
+but the company is explicitly below the target size band (pre-RevOps-maturity
+stage per the ICP). Her remit is likely to be firefighting rather than the
+complexity-wall problems the ICP targets.
+  → icp_score 40, recommendation DEPRIORITIZE.
+  Reasoning: Right function, wrong company stage. Pre-Series-B companies don't
+  have the systems complexity that justifies the engagement profile. Keep but
+  do not prioritize — may become ICP as company scales.
+
+[Example F] Marcus Williams — Salesforce Architect at Datadog — connected 2
+years ago, no DMs. Exact Track 2 title match (Salesforce Architect) at a
+flagship modern B2B SaaS company. Datadog's SFDC architecture is known to
+be complex and actively evolving. Even without DM history, title + company
+is enough for an 80+ score.
+  → icp_score 83, recommendation KEEP_ENGAGE.
+  Reasoning: Exact technical-architect match at a gold-standard B2B SaaS.
+  Salesforce Architect is the single most literal match for the SFDC-rebuild
+  sweet spot. Reach out with a peer-level technical framing.
+
+Return all results in one call via the score_profiles tool, each tagged with its
+0-based batch index."""
+
+    return [
+        {
+            "type": "text",
+            "text": text,
+            "cache_control": {"type": "ephemeral"},
+        }
+    ]
+
+
+def _build_batch_prompt(batch: list[dict]) -> str:
+    """Build the per-batch user message — only the profile rows, nothing shared."""
+    n = len(batch)
+    lines = [f"## Profiles to Score (batch of {n})", ""]
+    for i, item in enumerate(batch):
+        lines.append(f"[{i}] {item['full_name']}")
+        lines.append(f"    Position:        {item['position']}")
+        lines.append(f"    Company:         {item['company']}")
+        lines.append(f"    Connected:       {item['connected_on']}")
+        lines.append(f"    LinkedIn:        {item.get('url', 'N/A')}")
+        lines.append(f"    Triage Category: {item.get('category', 'UNKNOWN')}")
+        lines.append(f"    Triage Reason:   {item.get('triage_reason', '')}")
+        msg_block = _format_msg_block(item.get("msg_stats"))
+        if msg_block:
+            lines.append(f"    {msg_block}")
+        lines.append("")
+    lines.append(
+        f"Score all {n} profiles above and return results via the score_profiles tool, "
+        f"each keyed by its 0-based index."
+    )
+    return "\n".join(lines)
 
 
 def _format_msg_block(stats: dict | None) -> str:
-    """Format message engagement stats as a prompt section (empty string if no history)."""
+    """Format message engagement stats as a one-line prompt field (empty if no history)."""
     if not stats:
         return ""
     sent = stats.get("messages_sent", 0)
@@ -319,15 +496,19 @@ def _format_msg_block(stats: dict | None) -> str:
         recency = f"{days // 30} months ago"
     else:
         recency = f"{days // 365} year(s) ago"
-    initiated = "user initiated first contact" if stats.get("initiated_first") else "contact initiated first"
+    initiated = (
+        "user initiated first contact"
+        if stats.get("initiated_first")
+        else "contact initiated first"
+    )
     return (
-        f"DM History:       {total} messages across {threads} thread(s) "
-        f"({sent} sent / {received} received) — last contact {recency} — {initiated}\n"
+        f"DM History:      {total} messages across {threads} thread(s) "
+        f"({sent} sent / {received} received) — last contact {recency} — {initiated}"
     )
 
 
 def _format_customer_examples(customers: pd.DataFrame) -> list[dict]:
-    """Select up to MAX_CUSTOMER_EXAMPLES rows from customers, prefer fully-populated rows."""
+    """Select up to MAX_CUSTOMER_EXAMPLES rows, preferring fully-populated rows."""
     if customers.empty:
         return []
     complete = customers[
@@ -335,7 +516,11 @@ def _format_customer_examples(customers: pd.DataFrame) -> list[dict]:
         customers["company"].str.strip().astype(bool) &
         customers["position"].str.strip().astype(bool)
     ]
-    sample = complete.head(MAX_CUSTOMER_EXAMPLES) if len(complete) >= MAX_CUSTOMER_EXAMPLES else customers.head(MAX_CUSTOMER_EXAMPLES)
+    sample = (
+        complete.head(MAX_CUSTOMER_EXAMPLES)
+        if len(complete) >= MAX_CUSTOMER_EXAMPLES
+        else customers.head(MAX_CUSTOMER_EXAMPLES)
+    )
     return sample[["full_name", "position", "company"]].to_dict("records")
 
 

@@ -133,6 +133,14 @@ def run_triage(
 
     batches = [profiles[i:i + BATCH_SIZE] for i in range(0, len(profiles), BATCH_SIZE)]
 
+    # Re-key each batch to LOCAL 0-based indices. The tool schema tells Haiku
+    # "0-based index from the batch", and the main loop below uses
+    # batch[r["index"]] which requires local indexing. Without this fix, any
+    # batch after the first silently mis-aligns (global indices > batch size).
+    for batch in batches:
+        for local_i, item in enumerate(batch):
+            item["index"] = local_i
+
     for batch in tqdm(batches, desc="Triage (Haiku)", unit="batch"):
         results = _classify_batch(batch, icp, client)
         for r in results:

@@ -1,4 +1,4 @@
-anthropic>=0.28
+anthropic>=0.40
 supabase>=2.4
 voyageai>=0.2
 python-dotenv>=1.0

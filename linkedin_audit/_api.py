@@ -36,7 +36,7 @@ def get_client() -> anthropic.Anthropic:
 def call_with_backoff(
     client: anthropic.Anthropic,
     model: str,
-    system: str,
+    system: "str | list[dict]",
     messages: list[dict],
     tools: list[dict],
     max_tokens: int = 2000,
@@ -44,6 +44,10 @@ def call_with_backoff(
 ) -> anthropic.types.Message:
     """
     Call client.messages.create() with exponential backoff.
+
+    `system` may be a plain string (legacy) or a list of content blocks — the
+    latter is required when using prompt caching via `cache_control` markers.
+    The Anthropic SDK accepts both forms natively; no special handling here.
 
     Retryable: RateLimitError, APIStatusError (529), APIConnectionError.
     Non-retryable: AuthenticationError, PermissionDeniedError.

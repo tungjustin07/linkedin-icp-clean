@@ -29,9 +29,14 @@ def generate_outputs(
     icp_config: dict,
     output_dir: Path = OUTPUT_DIR,
     dry_run: bool = False,
+    prefilter_dropped: "pd.DataFrame | None" = None,
 ) -> dict:
     """
     Merge all results, write CSVs, print summary.
+
+    `prefilter_dropped` (optional): rows dropped by the deterministic pre-filter
+    before any AI call. They are appended to remove.csv with category="PREFILTERED"
+    and triage_reason=drop_reason so the final unfollow list remains complete.
 
     Returns a summary dict with audit metrics.
     """
@@ -40,7 +45,9 @@ def generate_outputs(
 
     # Build output DataFrames
     keep_df = _build_keep_df(connections, triage_results, score_results, keep_threshold)
-    remove_df = _build_remove_df(connections, triage_results, score_results, keep_threshold)
+    remove_df = _build_remove_df(
+        connections, triage_results, score_results, keep_threshold, prefilter_dropped
+    )
     targets_df = _score_targets(targets, icp) if not targets.empty else pd.DataFrame()
 
     # Write outputs
@@ -153,10 +160,11 @@ def _build_remove_df(
     triage_results: pd.DataFrame,
     score_results: pd.DataFrame,
     keep_threshold: int,
+    prefilter_dropped: "pd.DataFrame | None" = None,
 ) -> pd.DataFrame:
     """
     Build remove.csv.
-    Includes: triage failures + Sonnet REMOVE recommendations.
+    Includes: pre-filtered drops (if any) + triage failures + Sonnet REMOVE recommendations.
     """
     df = connections.merge(
         triage_results[["profile_id", "category", "triage_pass", "triage_reason"]],
@@ -178,6 +186,19 @@ def _build_remove_df(
     remove["recommendation"] = remove["recommendation"].fillna("FAILED_TRIAGE")
     remove["reasoning"] = remove["reasoning"].fillna(remove["triage_reason"].fillna(""))
     remove["category"] = remove["category"].fillna("UNKNOWN")
+
+    # Append pre-filter drops so the unfollow list is complete.
+    if prefilter_dropped is not None and not prefilter_dropped.empty:
+        pf = prefilter_dropped.copy()
+        drop_reason = pf["drop_reason"] if "drop_reason" in pf.columns else ""
+        pf["category"] = "PREFILTERED"
+        pf["triage_pass"] = False
+        pf["triage_reason"] = drop_reason
+        pf["icp_score"] = -1
+        pf["recommendation"] = "PREFILTER_DROP"
+        pf["reasoning"] = drop_reason
+        remove = pd.concat([remove, pf], ignore_index=True, sort=False)
+        remove["icp_score"] = remove["icp_score"].fillna(-1).astype(int)
 
     cols = ["profile_id", "full_name", "company", "position", "url",
             "category", "triage_reason", "icp_score", "reasoning", "connected_on"]

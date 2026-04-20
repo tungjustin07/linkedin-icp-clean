@@ -14,10 +14,11 @@ Usage:
         [--cache-dir  cache/]
 
 Pipeline steps:
-    1. Ingest: load all CSVs + icp_config
-    2. Triage: Haiku batch classification (20 profiles/call)
-    3. Score:  Sonnet deep ICP scoring (profiles that passed triage)
-    4. Report: write keep.csv / remove.csv / targets_prioritized.csv + console summary
+    1. Ingest:    load all CSVs + icp_config
+    1.5 Prefilter: deterministic $0 drop of empty/spam/cold-stale profiles
+    2. Triage:    Haiku batch classification (20 profiles/call)
+    3. Score:     Sonnet deep ICP scoring (profiles that passed triage, 5 profiles/call, prompt-cached)
+    4. Report:    write keep.csv / remove.csv / targets_prioritized.csv + console summary
 """
 
 from __future__ import annotations
@@ -47,7 +48,7 @@ def main() -> None:
     cache_dir = Path(args.cache_dir)
     output_dir = Path(args.output_dir)
 
-    from linkedin_audit import ingest, triage, score, report
+    from linkedin_audit import ingest, prefilter, triage, score, report
 
     # ── Step 1: Ingest ────────────────────────────────────────────────────────
     log.info("Step 1/4: Loading data...")
@@ -67,6 +68,23 @@ def main() -> None:
         len(messages) if not messages.empty else 0,
     )
 
+    # ── Step 1.5: Pre-filter ─────────────────────────────────────────────────
+    log.info("Step 1.5/4: Deterministic pre-filter...")
+    try:
+        kept_connections, prefilter_dropped = prefilter.run_prefilter(
+            connections,
+            messages=messages if not messages.empty else None,
+            icp_config=icp_config,
+        )
+    except Exception as e:
+        log.error("Pre-filter failed: %s", e, exc_info=True)
+        sys.exit(3)
+
+    # Persist dropped rows for audit visibility (non-dry-run only)
+    if not args.dry_run and not prefilter_dropped.empty:
+        cache_dir.mkdir(parents=True, exist_ok=True)
+        prefilter_dropped.to_parquet(cache_dir / "prefilter_dropped.parquet", index=False)
+
     # ── Step 2: Triage ────────────────────────────────────────────────────────
     log.info("Step 2/4: Triage with Haiku...")
     if args.skip_triage:
@@ -78,7 +96,7 @@ def main() -> None:
     else:
         try:
             triage_results = triage.run_triage(
-                connections,
+                kept_connections,
                 icp_config,
                 messages=messages if not messages.empty else None,
                 cache_path=cache_dir / "triage.parquet",
@@ -103,7 +121,7 @@ def main() -> None:
     else:
         try:
             score_results = score.run_scoring(
-                connections,
+                kept_connections,
                 triage_results,
                 icp_config,
                 customers,
@@ -128,6 +146,7 @@ def main() -> None:
             icp_config,
             output_dir=output_dir,
             dry_run=args.dry_run,
+            prefilter_dropped=prefilter_dropped if not prefilter_dropped.empty else None,
         )
     except Exception as e:
         log.error("Report generation failed: %s", e, exc_info=True)
