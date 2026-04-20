@@ -151,6 +151,20 @@ def build_unfollow_list(
     log.info("Loading %s", remove_csv_path)
     remove = pd.read_csv(remove_csv_path)
 
+    # Drop LinkedIn data-export ghosts — rows with no identifiable info
+    # (no full_name, no URL, no profile_id). These are usually canceled
+    # pending invites or deleted accounts; the user can't act on them.
+    before = len(remove)
+    identifiable_mask = (
+        remove["full_name"].fillna("").astype(str).str.strip().ne("")
+        | remove["url"].fillna("").astype(str).str.strip().ne("")
+        | remove["profile_id"].fillna("").astype(str).str.strip().ne("")
+    )
+    remove = remove[identifiable_mask].reset_index(drop=True)
+    dropped_ghosts = before - len(remove)
+    if dropped_ghosts:
+        log.info("Dropped %d unidentifiable LinkedIn export ghosts", dropped_ghosts)
+
     # ── Assign tier to each row based on category + icp_score ─────────────
     def _tier(row: pd.Series) -> str:
         cat = str(row.get("category", "")).upper()
@@ -202,6 +216,17 @@ def build_unfollow_list(
     else:
         log.warning("Score cache %s not found — DEPRIORITIZE tier will be empty", scores_parquet_path)
 
+    # ── Clean up the reasoning/triage_reason duplication ─────────────────
+    # report.py's _build_remove_df fills `reasoning` with `triage_reason`
+    # when no Sonnet score exists, which results in both columns carrying
+    # the same text ("COLD_STALE", "auto-fail anti-pattern", etc.). For the
+    # review CSV, keep the columns semantically distinct:
+    #   triage_reason  → prefilter drop code OR Haiku's one-sentence reason
+    #   reasoning      → Sonnet's 2-4 sentence ICP reasoning (blank if
+    #                    no Sonnet call was ever made on this profile)
+    not_scored = remove["tier"].isin([TIER_PREFILTER, TIER_ANTI_PATTERN])
+    remove.loc[not_scored, "reasoning"] = ""
+
     # ── Compute rescue_hint for every row ────────────────────────────────
     # Load DM history so "HAS_ENGAGEMENT" hint is accurate.
     msg_index: dict[str, int] = {}
@@ -244,6 +269,17 @@ def build_unfollow_list(
     output_path.parent.mkdir(parents=True, exist_ok=True)
     remove.to_csv(output_path, index=False)
     log.info("Wrote %d unfollow candidates to %s", len(remove), output_path)
+
+    # Also write a TSV copy — Numbers/Excel parse TSV more reliably than CSV
+    # when long quoted text fields contain commas.
+    tsv_path = output_path.with_suffix(".tsv")
+    tsv_df = remove.copy()
+    # Scrub any stray tabs in string fields before TSV export.
+    for col in tsv_df.columns:
+        if tsv_df[col].dtype == object:
+            tsv_df[col] = tsv_df[col].astype(str).str.replace("\t", " ", regex=False)
+    tsv_df.to_csv(tsv_path, sep="\t", index=False)
+    log.info("Wrote TSV copy to %s", tsv_path)
 
     # Print tier breakdown for the user
     breakdown = remove["tier"].value_counts().sort_index()
