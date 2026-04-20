@@ -43,6 +43,29 @@ _SPAM_KEYWORDS = (
     "whatsapp",
 )
 
+# Rescue regex patterns — profiles whose title/company matches any of these
+# are exempt from COLD_STALE even if they don't match an ICP title/industry.
+# These are connections worth keeping beyond strict ICP fit (VCs as good
+# introducers, IT leaders as potential hirers/peers). Defined here rather
+# than in icp_config.yaml because they are NOT buyer signals — we don't want
+# Sonnet to score them as primary ICP, just don't want prefilter to bulk-drop
+# them. All patterns are matched against a lowercased "position company" string.
+_RESCUE_PATTERNS = (
+    # VC / investor titles
+    r"\bventure\b", r"\bventures\b", r"\bcapital\b", r"\binvestor\b",
+    r"\bgeneral partner\b", r"\bmanaging partner\b", r"\bfounding partner\b",
+    r"\bventure partner\b", r"\bangel investor\b", r"\bgrowth equity\b",
+    r"\blimited partner\b",
+    # IT leadership titles (secondary buyer / potential hirer)
+    r"\bvp of it\b", r"\bvp information technology\b", r"\bvp, it\b",
+    r"\bhead of it\b", r"\bhead of information\b",
+    r"\bdirector of it\b", r"\bdirector of information\b",
+    r"\bchief information officer\b", r"\bcio\b",
+    r"\bchief technology officer\b", r"\bcto\b",
+)
+# Pre-compile once at import time for speed on ~11k-row DataFrames.
+_RESCUE_REGEX = re.compile("|".join(_RESCUE_PATTERNS), re.IGNORECASE)
+
 
 def run_prefilter(
     connections: pd.DataFrame,
@@ -112,11 +135,16 @@ def run_prefilter(
     else:
         icp_hit = pd.Series(False, index=df.index)
 
+    # Also exempt profiles that match a rescue pattern (VC / IT leader /
+    # etc.) — these are worth keeping beyond strict ICP fit.
+    rescue_hit = haystack.str.contains(_RESCUE_REGEX, regex=True, na=False)
+    keyword_hit = icp_hit | rescue_hit
+
     connected_on = pd.to_datetime(df["connected_on"], errors="coerce", utc=True)
     stale_connection = connected_on.notna() & (connected_on < stale_cutoff)
     no_msg_history = ~df["profile_id"].astype(str).isin(msged_ids)
 
-    cold_mask = no_msg_history & stale_connection & ~icp_hit
+    cold_mask = no_msg_history & stale_connection & ~keyword_hit
 
     # Reason priority: EMPTY > SPAM > COLD. An empty profile is "more dropped"
     # than a cold one — assign the strongest reason last so it overrides.
