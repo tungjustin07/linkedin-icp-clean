@@ -12,6 +12,7 @@ venv/
 # LinkedIn audit — never commit personal data or API cache
 data/
 cache/
+cache.bak.*/
 output/
 
 # Session checkpoint lives in ~/.claude/.../memory/, not in the repo
