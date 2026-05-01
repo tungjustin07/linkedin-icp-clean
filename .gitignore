@@ -13,3 +13,6 @@ venv/
 data/
 cache/
 output/
+
+# Session checkpoint lives in ~/.claude/.../memory/, not in the repo
+CHECKPOINT.md
